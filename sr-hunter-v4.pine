@@ -1,0 +1,536 @@
+//@version=6
+indicator(title = "SR Hunter V4", shorttitle = "SR Hunter V4", overlay = true, max_labels_count = 50, max_lines_count = 50, max_boxes_count = 20)
+
+//====================================================================
+// SR HUNTER V4
+// Think First. Trade Later.
+//
+// Blueprint Rules:
+// - Pine Script v6 only.
+// - Layered Analysis Engine.
+// - Trend -> Structure -> Location -> Trigger -> Quality -> Risk -> Decision -> UI.
+// - UI is output layer only.
+// - SR Hunter is validation partner, not a signal machine.
+//====================================================================
+
+//====================================================================
+// SECTION 1. INPUTS
+//====================================================================
+
+groupTrend = "01. Trend Engine"
+emaFastLength = input.int(50, "EMA Fast Length", minval = 1, group = groupTrend)
+emaSlowLength = input.int(200, "EMA Slow Length", minval = 1, group = groupTrend)
+emaFlatTolerancePct = input.float(0.05, "Sideways EMA Tolerance (%)", minval = 0.0, step = 0.01, group = groupTrend)
+
+groupStructure = "02. Structure Engine"
+pivotLength = input.int(5, "Pivot Length", minval = 1, group = groupStructure)
+
+groupLocation = "03. Location Engine"
+atrLength = input.int(14, "ATR Length", minval = 1, group = groupLocation)
+zoneAtrMultiplier = input.float(0.50, "S/R Zone ATR Multiplier", minval = 0.05, step = 0.05, group = groupLocation)
+
+groupQuality = "05. Quality Engine"
+rsiLength = input.int(14, "RSI Length", minval = 1, group = groupQuality)
+qualitySession = input.session("0000-2359", "Valid Session", group = groupQuality)
+minConfidence = input.float(70.0, "Minimum Confidence (%)", minval = 0.0, maxval = 98.0, step = 1.0, group = groupQuality)
+minAtrPct = input.float(0.01, "Minimum ATR (%)", minval = 0.0, step = 0.01, group = groupQuality)
+maxAtrPct = input.float(3.00, "Maximum ATR (%)", minval = 0.01, step = 0.01, group = groupQuality)
+manualSpreadTicks = input.float(0.0, "Manual Spread Proxy (Ticks)", minval = 0.0, step = 0.1, group = groupQuality)
+maxSpreadTicks = input.float(30.0, "Maximum Spread Proxy (Ticks)", minval = 0.0, step = 0.1, group = groupQuality)
+
+groupRisk = "06. Risk Engine"
+minimumRiskReward = input.float(1.50, "Minimum Risk Reward", minval = 0.1, step = 0.1, group = groupRisk)
+stopLossAtrMultiplier = input.float(1.50, "Fallback Stop Loss ATR Multiplier", minval = 0.1, step = 0.1, group = groupRisk)
+stopBufferAtrMultiplier = input.float(0.20, "S/R Stop Buffer ATR Multiplier", minval = 0.0, step = 0.05, group = groupRisk)
+maxStopLossAtrMultiplier = input.float(3.00, "Maximum Stop Distance ATR Multiplier", minval = 0.1, step = 0.1, group = groupRisk)
+maxRiskAtrPct = input.float(3.00, "Maximum Risk Volatility ATR (%)", minval = 0.01, step = 0.01, group = groupRisk)
+
+groupUI = "08. UI Output"
+showPanel = input.bool(true, "Show Panel", group = groupUI)
+showEmaLines = input.bool(true, "Show EMA50 / EMA200", group = groupUI)
+
+//====================================================================
+// SECTION 2. CORE CALCULATIONS
+//====================================================================
+
+emaFast = ta.ema(close, emaFastLength)
+emaSlow = ta.ema(close, emaSlowLength)
+atrValue = ta.atr(atrLength)
+rsiValue = ta.rsi(close, rsiLength)
+atrPct = close != 0.0 ? atrValue / close * 100.0 : 0.0
+zoneSize = atrValue * zoneAtrMultiplier
+sessionOk = not na(time(timeframe.period, qualitySession))
+
+//====================================================================
+// SECTION 3. EMA CHART OUTPUT
+//====================================================================
+
+plot(showEmaLines ? emaFast : na, title = "EMA50", color = color.rgb(244, 208, 63), linewidth = 1)
+plot(showEmaLines ? emaSlow : na, title = "EMA200", color = color.rgb(187, 134, 252), linewidth = 1)
+
+//====================================================================
+// SECTION 4. SHARED UTILITIES
+//====================================================================
+
+f_clamp(_value, _min, _max) =>
+    math.max(_min, math.min(_value, _max))
+
+f_roundOne(_value) =>
+    math.round(_value * 10.0) / 10.0
+
+f_priceText(_value) =>
+    na(_value) ? "n/a" : str.tostring(_value, format.mintick)
+
+f_statusColor(_status) =>
+    color result = color.gray
+    if _status == "BUY"
+        result := color.green
+    else if _status == "SELL"
+        result := color.red
+    else if _status == "WAIT"
+        result := color.yellow
+    else
+        result := color.gray
+    result
+
+f_trendColor(_trend) =>
+    color result = color.gray
+    if _trend == "Bullish"
+        result := color.green
+    else if _trend == "Bearish"
+        result := color.red
+    else if _trend == "Sideways"
+        result := color.yellow
+    else
+        result := color.gray
+    result
+
+f_confidenceColor(_confidence) =>
+    color result = color.rgb(120, 20, 20)
+    if _confidence <= 30.0
+        result := color.rgb(120, 20, 20)
+    else if _confidence <= 50.0
+        result := color.rgb(230, 126, 34)
+    else if _confidence <= 70.0
+        result := color.rgb(241, 196, 15)
+    else if _confidence <= 85.0
+        result := color.rgb(139, 195, 74)
+    else
+        result := color.rgb(46, 160, 67)
+    result
+
+f_signalTextColor(_signal) =>
+    color result = color.white
+    if _signal == "WAIT"
+        result := color.black
+    else
+        result := color.white
+    result
+
+f_trendTextColor(_trend) =>
+    color result = color.white
+    if _trend == "Sideways"
+        result := color.black
+    else
+        result := color.white
+    result
+
+f_confidenceTextColor(_confidence) =>
+    color result = color.white
+    if _confidence >= 50.0 and _confidence <= 70.0
+        result := color.black
+    else
+        result := color.white
+    result
+
+f_emaConditionText(_close, _emaFast, _emaSlow) =>
+    string result = ""
+    if _close >= _emaFast
+        if _emaFast >= _emaSlow
+            result := "Price > 50 > 200"
+        else
+            result := "Price > 50 < 200"
+    else
+        if _emaFast <= _emaSlow
+            result := "Price < 50 < 200"
+        else
+            result := "Price < 50 > 200"
+    result
+
+f_sessionText() =>
+    int h = hour(time, syminfo.timezone)
+    bool asn = h >= 0 and h < 8
+    bool ldn = h >= 7 and h < 16
+    bool ny = h >= 13 and h < 22
+    string result = ""
+    if asn and ldn and not ny
+        result := "ASN • LDN"
+    else if ldn and ny and not asn
+        result := "LDN • NY"
+    else if ny and asn and not ldn
+        result := "NY • ASN"
+    else if asn
+        result := "ASN"
+    else if ldn
+        result := "LDN"
+    else if ny
+        result := "NY"
+    else
+        result := "OFF"
+    result
+
+//====================================================================
+// SECTION 5. TREND ENGINE
+//====================================================================
+
+f_trendEngine(_emaFast, _emaSlow, _flatTolerancePct) =>
+    float diffPct = _emaSlow != 0.0 ? math.abs(_emaFast - _emaSlow) / _emaSlow * 100.0 : 0.0
+    bool isSideways = diffPct <= _flatTolerancePct
+    string localTrendState = "Sideways"
+    string localEmaState = "Flat"
+    if not isSideways
+        if _emaFast > _emaSlow
+            localTrendState := "Bullish"
+            localEmaState := "Bullish EMA"
+        else
+            localTrendState := "Bearish"
+            localEmaState := "Bearish EMA"
+    bool localTrendPassBuy = localTrendState == "Bullish"
+    bool localTrendPassSell = localTrendState == "Bearish"
+    [localTrendState, localEmaState, localTrendPassBuy, localTrendPassSell]
+
+[trendState, emaStateRaw, trendPassBuy, trendPassSell] = f_trendEngine(emaFast, emaSlow, emaFlatTolerancePct)
+
+//====================================================================
+// SECTION 6. STRUCTURE ENGINE
+//====================================================================
+
+pivotHigh = ta.pivothigh(high, pivotLength, pivotLength)
+pivotLow = ta.pivotlow(low, pivotLength, pivotLength)
+
+var float previousSwingHigh = na
+var float lastSwingHigh = na
+var float previousSwingLow = na
+var float lastSwingLow = na
+
+if not na(pivotHigh)
+    previousSwingHigh := lastSwingHigh
+    lastSwingHigh := pivotHigh
+
+if not na(pivotLow)
+    previousSwingLow := lastSwingLow
+    lastSwingLow := pivotLow
+
+f_structureEngine(_lastHigh, _previousHigh, _lastLow, _previousLow) =>
+    bool hasHighs = not na(_lastHigh) and not na(_previousHigh)
+    bool hasLows = not na(_lastLow) and not na(_previousLow)
+    bool localIsHH = hasHighs and _lastHigh > _previousHigh
+    bool localIsLH = hasHighs and _lastHigh < _previousHigh
+    bool localIsHL = hasLows and _lastLow > _previousLow
+    bool localIsLL = hasLows and _lastLow < _previousLow
+    bool bullishStructure = localIsHH and localIsHL
+    bool bearishStructure = localIsLH and localIsLL
+    string localStructureState = "Mixed Structure"
+    string localStructureCompact = "Mixed"
+    if bullishStructure
+        localStructureState := "Bullish Structure"
+        localStructureCompact := "HH → HL"
+    else if bearishStructure
+        localStructureState := "Bearish Structure"
+        localStructureCompact := "LH → LL"
+    bool localStructurePassBuy = bullishStructure
+    bool localStructurePassSell = bearishStructure
+    [localStructureState, localStructureCompact, localStructurePassBuy, localStructurePassSell, localIsHH, localIsHL, localIsLH, localIsLL]
+
+[structureState, structureCompact, structurePassBuy, structurePassSell, isHH, isHL, isLH, isLL] = f_structureEngine(lastSwingHigh, previousSwingHigh, lastSwingLow, previousSwingLow)
+
+//====================================================================
+// SECTION 7. LOCATION ENGINE
+//====================================================================
+
+f_locationEngine(_support, _resistance, _zoneSize) =>
+    bool hasSupport = not na(_support)
+    bool hasResistance = not na(_resistance)
+    bool localAtSupport = hasSupport and close >= _support - _zoneSize and close <= _support + _zoneSize
+    bool localNearSupport = hasSupport and close > _support + _zoneSize and close <= _support + (_zoneSize * 2.0)
+    bool localAtResistance = hasResistance and close >= _resistance - _zoneSize and close <= _resistance + _zoneSize
+    bool localNearResistance = hasResistance and close < _resistance - _zoneSize and close >= _resistance - (_zoneSize * 2.0)
+    bool localNeutralZone = not localAtSupport and not localNearSupport and not localAtResistance and not localNearResistance and hasSupport and hasResistance and close > _support and close < _resistance
+    string localLocationState = "Out Of Zone"
+    float localLocationScore = 0.0
+    if localAtSupport
+        localLocationState := "Support"
+        localLocationScore := 100.0
+    else if localNearSupport
+        localLocationState := "Near Support"
+        localLocationScore := 80.0
+    else if localAtResistance
+        localLocationState := "Resistance"
+        localLocationScore := 100.0
+    else if localNearResistance
+        localLocationState := "Near Resistance"
+        localLocationScore := 80.0
+    else if localNeutralZone
+        localLocationState := "Neutral"
+        localLocationScore := 50.0
+    bool localBuyLocationPass = localAtSupport or localNearSupport or localAtResistance or localNearResistance
+    bool localSellLocationPass = localAtResistance or localNearResistance or localAtSupport or localNearSupport
+    [localLocationState, localLocationScore, localBuyLocationPass, localSellLocationPass, localAtSupport, localNearSupport, localAtResistance, localNearResistance]
+
+[locationState, locationScore, locationPassBuy, locationPassSell, atSupport, nearSupport, atResistance, nearResistance] = f_locationEngine(lastSwingLow, lastSwingHigh, zoneSize)
+
+//====================================================================
+// SECTION 8. TRIGGER ENGINE
+//====================================================================
+
+f_triggerEngine(_support, _resistance, _emaFast, _zoneSize) =>
+    bool hasSupport = not na(_support)
+    bool hasResistance = not na(_resistance)
+    float bodySize = math.abs(close - open)
+    float barRange = high - low
+    float lowerWick = math.min(open, close) - low
+    float upperWick = high - math.max(open, close)
+    bool validRange = barRange > 0.0
+    bool bullishCandle = close > open
+    bool bearishCandle = close < open
+    bool bullishBreakout = hasResistance and close > _resistance and close[1] <= _resistance
+    bool bearishBreakout = hasSupport and close < _support and close[1] >= _support
+    bool bullishPullback = close > _emaFast and low <= _emaFast + _zoneSize and bullishCandle
+    bool bearishPullback = close < _emaFast and high >= _emaFast - _zoneSize and bearishCandle
+    bool bullishBreakRetest = hasResistance and close > _resistance and low <= _resistance + _zoneSize and bullishCandle
+    bool bearishBreakRetest = hasSupport and close < _support and high >= _support - _zoneSize and bearishCandle
+    bool bullishRejection = hasSupport and low <= _support + _zoneSize and bullishCandle and validRange and lowerWick > bodySize
+    bool bearishRejection = hasResistance and high >= _resistance - _zoneSize and bearishCandle and validRange and upperWick > bodySize
+    bool localTriggerBuy = bullishBreakout or bullishPullback or bullishBreakRetest or bullishRejection
+    bool localTriggerSell = bearishBreakout or bearishPullback or bearishBreakRetest or bearishRejection
+    string localTriggerBuyName = "WAIT"
+    string localTriggerSellName = "WAIT"
+    if bullishBreakout
+        localTriggerBuyName := "Breakout"
+    else if bullishBreakRetest
+        localTriggerBuyName := "Break & Retest"
+    else if bullishPullback
+        localTriggerBuyName := "Pullback"
+    else if bullishRejection
+        localTriggerBuyName := "Rejection"
+    if bearishBreakout
+        localTriggerSellName := "Breakout"
+    else if bearishBreakRetest
+        localTriggerSellName := "Break & Retest"
+    else if bearishPullback
+        localTriggerSellName := "Pullback"
+    else if bearishRejection
+        localTriggerSellName := "Rejection"
+    [localTriggerBuy, localTriggerSell, localTriggerBuyName, localTriggerSellName]
+
+[rawTriggerBuy, rawTriggerSell, triggerBuyName, triggerSellName] = f_triggerEngine(lastSwingLow, lastSwingHigh, emaFast, zoneSize)
+triggerPassBuy = trendPassBuy and structurePassBuy and locationPassBuy and rawTriggerBuy
+triggerPassSell = trendPassSell and structurePassSell and locationPassSell and rawTriggerSell
+
+//====================================================================
+// SECTION 9. QUALITY ENGINE
+//====================================================================
+
+f_qualityEngine(_rsi, _atrPct, _minAtrPct, _maxAtrPct, _manualSpreadTicks, _maxSpreadTicks, _sessionOk) =>
+    bool localAtrOk = _atrPct >= _minAtrPct and _atrPct <= _maxAtrPct
+    bool localSpreadOk = _manualSpreadTicks <= _maxSpreadTicks
+    bool localRsiBuyOk = _rsi >= 50.0 and _rsi <= 70.0
+    bool localRsiSellOk = _rsi <= 50.0 and _rsi >= 30.0
+    float buyScore = 0.0
+    float sellScore = 0.0
+    if localRsiBuyOk
+        buyScore += 4.0
+    if localRsiSellOk
+        sellScore += 4.0
+    if _sessionOk
+        buyScore += 3.0
+        sellScore += 3.0
+    if localAtrOk
+        buyScore += 2.0
+        sellScore += 2.0
+    if localSpreadOk
+        buyScore += 1.0
+        sellScore += 1.0
+    float localBuyQuality = f_clamp(buyScore * 10.0, 0.0, 100.0)
+    float localSellQuality = f_clamp(sellScore * 10.0, 0.0, 100.0)
+    [localBuyQuality, localSellQuality, _sessionOk, localAtrOk, localSpreadOk, localRsiBuyOk, localRsiSellOk]
+
+[qualityBuy, qualitySell, qualitySessionOk, qualityAtrOk, qualitySpreadOk, rsiBuyOk, rsiSellOk] = f_qualityEngine(rsiValue, atrPct, minAtrPct, maxAtrPct, manualSpreadTicks, maxSpreadTicks, sessionOk)
+
+//====================================================================
+// SECTION 10. RISK ENGINE
+//====================================================================
+
+f_riskEngine(_support, _resistance, _atr, _atrPct, _minimumRiskReward, _stopLossAtrMultiplier, _stopBufferAtrMultiplier, _maxStopLossAtrMultiplier, _maxRiskAtrPct, _manualSpreadTicks, _maxSpreadTicks) =>
+    bool hasSupport = not na(_support)
+    bool hasResistance = not na(_resistance)
+    float fallbackBuyStop = close - (_atr * _stopLossAtrMultiplier)
+    float rawBuyStop = hasSupport ? _support - (_atr * _stopBufferAtrMultiplier) : fallbackBuyStop
+    float buyStop = rawBuyStop < close ? rawBuyStop : fallbackBuyStop
+    float buyRiskDistance = close - buyStop
+    float buyTarget = hasResistance and _resistance > close ? _resistance : close + (buyRiskDistance * _minimumRiskReward)
+    float buyRewardDistance = buyTarget - close
+    float buyRR = buyRiskDistance > 0.0 ? buyRewardDistance / buyRiskDistance : 0.0
+    float fallbackSellStop = close + (_atr * _stopLossAtrMultiplier)
+    float rawSellStop = hasResistance ? _resistance + (_atr * _stopBufferAtrMultiplier) : fallbackSellStop
+    float sellStop = rawSellStop > close ? rawSellStop : fallbackSellStop
+    float sellRiskDistance = sellStop - close
+    float sellTarget = hasSupport and _support < close ? _support : close - (sellRiskDistance * _minimumRiskReward)
+    float sellRewardDistance = close - sellTarget
+    float sellRR = sellRiskDistance > 0.0 ? sellRewardDistance / sellRiskDistance : 0.0
+    bool buyStopOk = _atr > 0.0 and buyRiskDistance > 0.0 and buyRiskDistance <= _atr * _maxStopLossAtrMultiplier
+    bool sellStopOk = _atr > 0.0 and sellRiskDistance > 0.0 and sellRiskDistance <= _atr * _maxStopLossAtrMultiplier
+    bool volatilityOk = _atrPct <= _maxRiskAtrPct
+    bool spreadOk = _manualSpreadTicks <= _maxSpreadTicks
+    bool localRiskPassBuy = buyRR >= _minimumRiskReward and buyStopOk and volatilityOk and spreadOk
+    bool localRiskPassSell = sellRR >= _minimumRiskReward and sellStopOk and volatilityOk and spreadOk
+    [localRiskPassBuy, localRiskPassSell, buyRR, sellRR, buyRiskDistance, sellRiskDistance, volatilityOk, spreadOk]
+
+[riskPassBuy, riskPassSell, buyRiskReward, sellRiskReward, buyStopDistance, sellStopDistance, riskVolatilityOk, riskSpreadOk] = f_riskEngine(lastSwingLow, lastSwingHigh, atrValue, atrPct, minimumRiskReward, stopLossAtrMultiplier, stopBufferAtrMultiplier, maxStopLossAtrMultiplier, maxRiskAtrPct, manualSpreadTicks, maxSpreadTicks)
+
+//====================================================================
+// SECTION 11. CONFIDENCE ENGINE
+//====================================================================
+
+f_dynamicConfidence(_trendPass, _structurePass, _emaDirectionOk, _emaPriceOk, _locationScore, _locationPass, _triggerPass, _qualityScore, _riskPass) =>
+    float trendComponent = _trendPass ? 15.0 : 0.0
+    float structureComponent = _structurePass ? 20.0 : 0.0
+    float emaComponent = _emaDirectionOk and _emaPriceOk ? 10.0 : _emaPriceOk ? 5.0 : 0.0
+    float locationComponent = _locationPass ? f_clamp(_locationScore, 0.0, 100.0) * 0.15 : 0.0
+    float triggerComponent = _triggerPass ? 15.0 : 0.0
+    float qualityComponent = f_clamp(_qualityScore, 0.0, 100.0) * 0.15
+    float riskComponent = _riskPass ? 10.0 : 0.0
+    float totalConfidence = trendComponent + structureComponent + emaComponent + locationComponent + triggerComponent + qualityComponent + riskComponent
+    f_roundOne(f_clamp(totalConfidence, 0.0, 98.0))
+
+emaDirectionBuyOk = emaFast > emaSlow
+emaDirectionSellOk = emaFast < emaSlow
+emaPriceBuyOk = close > emaFast
+emaPriceSellOk = close < emaFast
+confidenceBuy = f_dynamicConfidence(trendPassBuy, structurePassBuy, emaDirectionBuyOk, emaPriceBuyOk, locationScore, locationPassBuy, triggerPassBuy, qualityBuy, riskPassBuy)
+confidenceSell = f_dynamicConfidence(trendPassSell, structurePassSell, emaDirectionSellOk, emaPriceSellOk, locationScore, locationPassSell, triggerPassSell, qualitySell, riskPassSell)
+
+//====================================================================
+// SECTION 12. DECISION ENGINE
+//====================================================================
+
+f_decisionEngine(_trendState, _structureState, _locationPassBuy, _locationPassSell, _triggerPassBuy, _triggerPassSell, _riskPassBuy, _riskPassSell, _confidenceBuy, _confidenceSell, _minConfidence) =>
+    bool bullishTrend = _trendState == "Bullish"
+    bool bearishTrend = _trendState == "Bearish"
+    bool sidewaysTrend = _trendState == "Sideways"
+    bool bullishStructure = _structureState == "Bullish Structure"
+    bool bearishStructure = _structureState == "Bearish Structure"
+    bool mixedStructure = _structureState == "Mixed Structure"
+    string localDecision = "WAIT"
+    string localReason = "Waiting For Setup"
+    if sidewaysTrend
+        localDecision := "NO TRADE"
+        localReason := "Trend Sideways"
+    else if mixedStructure
+        localDecision := "NO TRADE"
+        localReason := "Structure Mixed"
+    else if bullishTrend and bullishStructure
+        if not _locationPassBuy
+            localDecision := "WAIT"
+            localReason := "Location WAIT"
+        else if not _triggerPassBuy
+            localDecision := "WAIT"
+            localReason := "Trigger WAIT"
+        else if not _riskPassBuy
+            localDecision := "NO TRADE"
+            localReason := "Risk FAIL"
+        else if _confidenceBuy < _minConfidence
+            localDecision := "WAIT"
+            localReason := "Quality WAIT"
+        else
+            localDecision := "BUY"
+            localReason := "Setup PASS"
+    else if bearishTrend and bearishStructure
+        if not _locationPassSell
+            localDecision := "WAIT"
+            localReason := "Location WAIT"
+        else if not _triggerPassSell
+            localDecision := "WAIT"
+            localReason := "Trigger WAIT"
+        else if not _riskPassSell
+            localDecision := "NO TRADE"
+            localReason := "Risk FAIL"
+        else if _confidenceSell < _minConfidence
+            localDecision := "WAIT"
+            localReason := "Quality WAIT"
+        else
+            localDecision := "SELL"
+            localReason := "Setup PASS"
+    else
+        localDecision := "NO TRADE"
+        localReason := "Trend & Structure Conflict"
+    [localDecision, localReason]
+
+[decisionSignal, decisionReason] = f_decisionEngine(trendState, structureState, locationPassBuy, locationPassSell, triggerPassBuy, triggerPassSell, riskPassBuy, riskPassSell, confidenceBuy, confidenceSell, minConfidence)
+
+//====================================================================
+// SECTION 13. UI DATA SELECTION
+//====================================================================
+
+activeConfidence = decisionSignal == "SELL" ? confidenceSell : trendState == "Bearish" ? confidenceSell : confidenceBuy
+signalColor = f_statusColor(decisionSignal)
+trendColor = f_trendColor(trendState)
+confidenceColor = f_confidenceColor(activeConfidence)
+timeText = str.format_time(time, "HH:mm", syminfo.timezone)
+confidenceText = str.tostring(activeConfidence, "#.0") + "%"
+sessionText = f_sessionText()
+supportText = f_priceText(lastSwingLow)
+resistanceText = f_priceText(lastSwingHigh)
+signalText = decisionSignal
+trendText = trendState
+structureText = structureCompact
+emaText = f_emaConditionText(close, emaFast, emaSlow)
+
+//====================================================================
+// SECTION 14. UI PANEL
+//====================================================================
+
+panelBg = color.new(color.rgb(18, 20, 24), 72)
+panelHeaderBg = color.new(color.rgb(24, 27, 32), 62)
+panelValueBg = color.new(color.rgb(31, 34, 40), 66)
+panelBorder = color.new(color.rgb(120, 120, 120), 88)
+
+var table srPanel = table.new(position.top_right, 2, 8, panelBg, panelBorder, 0, panelBorder, 1)
+
+f_panelRow(_table, _row, _label, _value, _bgColor, _valueTextColor) =>
+    table.cell(_table, 0, _row, _label, text_color = color.new(color.white, 12), bgcolor = panelHeaderBg, text_size = size.tiny)
+    table.cell(_table, 1, _row, _value, text_color = _valueTextColor, bgcolor = _bgColor, text_size = size.tiny)
+
+if barstate.islast
+    if showPanel
+        f_panelRow(srPanel, 0, "Signal", signalText, color.new(signalColor, 24), f_signalTextColor(signalText))
+        f_panelRow(srPanel, 1, "Trend", trendText, color.new(trendColor, 28), f_trendTextColor(trendText))
+        f_panelRow(srPanel, 2, "Structure", structureText, panelValueBg, color.new(color.white, 8))
+        f_panelRow(srPanel, 3, "EMA", emaText, panelValueBg, color.new(color.white, 8))
+        f_panelRow(srPanel, 4, "Support", supportText, panelValueBg, color.new(color.white, 8))
+        f_panelRow(srPanel, 5, "Resistance", resistanceText, panelValueBg, color.new(color.white, 8))
+        f_panelRow(srPanel, 6, "Confidence", confidenceText, color.new(confidenceColor, 24), f_confidenceTextColor(activeConfidence))
+        f_panelRow(srPanel, 7, "Session", sessionText, panelValueBg, color.new(color.white, 8))
+    else
+        table.clear(srPanel, 0, 0, 1, 7)
+
+//====================================================================
+// SECTION 15. INTERNAL STATUS VALUES
+//====================================================================
+
+trendStatusBuy = trendPassBuy ? "PASS" : "WAIT"
+trendStatusSell = trendPassSell ? "PASS" : "WAIT"
+structureStatusBuy = structurePassBuy ? "PASS" : "WAIT"
+structureStatusSell = structurePassSell ? "PASS" : "WAIT"
+locationStatusBuy = locationPassBuy ? "PASS" : "WAIT"
+locationStatusSell = locationPassSell ? "PASS" : "WAIT"
+triggerStatusBuy = triggerPassBuy ? "PASS" : "WAIT"
+triggerStatusSell = triggerPassSell ? "PASS" : "WAIT"
+qualityStatusBuy = confidenceBuy >= minConfidence ? "PASS" : "WAIT"
+qualityStatusSell = confidenceSell >= minConfidence ? "PASS" : "WAIT"
+riskStatusBuy = riskPassBuy ? "PASS" : "FAIL"
+riskStatusSell = riskPassSell ? "PASS" : "FAIL"
+
+//====================================================================
+// SECTION 16. END OF MASTER SOURCE
+//====================================================================
